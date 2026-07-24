@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.streamlit/secrets.toml
+
+# Media, assets, and temporary files
+video/
+sop/
+archive/
+temp/
+*.mp4
+*.pdf
+*.csv
+*.html
