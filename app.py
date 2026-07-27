@@ -23,7 +23,7 @@ def main():
     # --- Sidebar 設定區 ---
     with st.sidebar:
         st.header("⚙️ 系統設定")
-        model_selection = st.selectbox("視覺模型選擇", ["gemini", "ollama (地端模型)", "mock (測試模擬器)"])
+        model_selection = st.selectbox("視覺模型選擇", ["gemini", "ollama (地端模型)", "mock (測試模擬器)", "partner (合作廠商地端API)"])
         
         gemini_model_version = "gemini-3.5-flash"
         ollama_model_version = "llava-llama3"
@@ -56,15 +56,22 @@ def main():
             else:
                 st.warning("⚠️ 無法連線至本機 Ollama，請確認 Ollama 已啟動。")
                 ollama_model_version = st.text_input("Ollama 模型名稱", value="llava-llama3")
+        elif "partner" in model_selection:
+            partner_api_url = st.text_input("廠商 API 端點 URL", value="http://192.168.0.184:8000/")
+            partner_model_name = st.text_input("模型名稱 (選填)", value="default")
+            
         st.markdown("---")
         
         # 從安全設定檔讀取 API Key
         api_key_input = ""
-        if "GEMINI_API_KEY" in st.secrets:
-            api_key_input = st.secrets["GEMINI_API_KEY"]
-            st.success("🔒 API Key 已從安全設定檔中自動載入。")
-        else:
-            st.warning("⚠️ 未偵測到 API Key。請確保在 `.streamlit/secrets.toml` 中設定。")
+        try:
+            if "GEMINI_API_KEY" in st.secrets:
+                api_key_input = st.secrets["GEMINI_API_KEY"]
+                st.success("🔒 API Key 已從安全設定檔中自動載入。")
+            else:
+                st.warning("⚠️ 未偵測到 API Key。請確保在 `.streamlit/secrets.toml` 中設定。")
+        except Exception:
+            st.warning("⚠️ 未建立 `.streamlit/secrets.toml` 設定檔。若您要使用 Gemini，請手動建立或在介面輸入 API Key（若介面有提供）。")
     
     st.title("🎬 分鏡稿自動生成系統")
     st.markdown("透過視覺 AI 分析影片，自動擷取關鍵動作、零件辨識，並產生標準工時比對的分鏡稿。")
@@ -238,8 +245,8 @@ def main():
             progress_bar = st.progress(0, text="系統處理中，請稍候...")
 
             # 防呆機制：若選擇真實 AI 但未輸入 API Key，阻擋執行
-            if "mock" not in model_selection and "ollama" not in model_selection and not api_key_input:
-                st.error("⚠️ 請確保已在 `.streamlit/secrets.toml` 中設定 API Key，或切換為「測試模擬器」/「Ollama地端模型」。")
+            if "mock" not in model_selection and "ollama" not in model_selection and "partner" not in model_selection and not api_key_input:
+                st.error("⚠️ 請確保已在 `.streamlit/secrets.toml` 中設定 API Key，或切換為「測試模擬器」/「Ollama地端模型」/「合作廠商地端API」。")
                 return
 
             try:
@@ -253,17 +260,26 @@ def main():
                     model_type_parsed = "mock"
                 elif "ollama" in model_selection:
                     model_type_parsed = "ollama"
+                elif "partner" in model_selection:
+                    model_type_parsed = "partner"
                 else:
                     model_type_parsed = "gemini"
                 
                 # 確保 API Key 沒有夾帶換行或空白字元，避免 gRPC 發生 Illegal header value 錯誤
                 safe_api_key = api_key_input.strip() if api_key_input else ""
                 
-                vision_model = get_vision_model(
-                    model_type=model_type_parsed, 
-                    api_key=safe_api_key,
-                    model_name=gemini_model_version if model_type_parsed == "gemini" else ollama_model_version
-                )
+                if model_type_parsed == "partner":
+                    vision_model = get_vision_model(
+                        model_type=model_type_parsed,
+                        endpoint_url=partner_api_url,
+                        model_name=partner_model_name
+                    )
+                else:
+                    vision_model = get_vision_model(
+                        model_type=model_type_parsed, 
+                        api_key=safe_api_key,
+                        model_name=gemini_model_version if model_type_parsed == "gemini" else ollama_model_version
+                    )
                 
                 import analyzer as analyzer_mod
                 importlib.reload(analyzer_mod)
@@ -466,12 +482,11 @@ def main():
     # 1. 處理 PDF 預覽
     if st.session_state.get("pdf_preview_requested", False) and 'pdf_preview_ui_container' in locals():
         with pdf_preview_ui_container:
-            if "mock" not in model_selection and "ollama" not in model_selection and not api_key_input:
+            if "mock" not in model_selection and "ollama" not in model_selection and "partner" not in model_selection and not api_key_input:
                 st.error("請先在左側邊欄輸入 API Key！")
             elif "pdf_preview_tasks" not in st.session_state and "pdf_preview_error" not in st.session_state:
                 with st.spinner("正在呼叫 Vision AI 分析 PDF 前 3 頁... (您的版面不會消失)"):
                     import tempfile
-                    import os
                     from models import get_vision_model
                     from sop_task_planner import SOPTaskPlanner
                     
@@ -479,14 +494,21 @@ def main():
                         m_type = "mock"
                     elif "ollama" in model_selection:
                         m_type = "ollama"
+                    elif "partner" in model_selection:
+                        m_type = "partner"
                     else:
                         m_type = "gemini"
                         
                     m_name = ""
                     if m_type == "gemini": m_name = gemini_model_version
                     elif m_type == "ollama": m_name = locals().get("ollama_model_version", "llava-llama3")
+                    elif m_type == "partner": m_name = locals().get("partner_model_name", "default")
                         
-                    vm = get_vision_model(model_type=m_type, api_key=api_key_input.strip() if api_key_input else "", model_name=m_name)
+                    if m_type == "partner":
+                        vm = get_vision_model(model_type=m_type, endpoint_url=locals().get("partner_api_url", ""), model_name=m_name)
+                    else:
+                        vm = get_vision_model(model_type=m_type, api_key=api_key_input.strip() if api_key_input else "", model_name=m_name)
+
                     planner = SOPTaskPlanner(vision_model=vm)
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:

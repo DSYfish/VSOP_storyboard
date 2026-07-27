@@ -442,6 +442,214 @@ class MockVisionModel(BaseVisionModel):
     def generate_text(self, prompt: str) -> str:
         return '{"extracted_glossary": ["TB 6PIN 端子", "網路交換器"], "refined_storyboard": []}'
 
+class PartnerVisionModel(BaseVisionModel):
+    """
+    合作廠商地端 API (假設使用相容於 OpenAI /v1/chat/completions 的格式)
+    """
+    def __init__(self, endpoint_url: str, model_name: str = "default"):
+        self.endpoint_url = endpoint_url.rstrip('/')
+        self.model_name = model_name
+
+    def _get_headers(self):
+        headers = {"Content-Type": "application/json"}
+        return headers
+
+    def analyze_frame(self, image_base64: str, source_video: str = "", glossary: list = None) -> dict:
+        try:
+            import requests
+            prompt = f"""
+            你是一個專業的工業工程師，負責分析工廠作業影片。
+            這是一張從影片「{source_video}」中擷取的畫面。
+            請觀察畫面中的人員動作、手部操作、以及接觸的機器或零件。
+            
+            請務必使用「繁體中文 (Traditional Chinese)」回答。
+            請回傳嚴格的 JSON 格式，包含兩個欄位：
+            - "part_name": "正在被操作的主要零件或設備名稱"
+            - "action_description": "發生的具體動作描述"
+            
+            若畫面中沒有明顯動作，可以回傳 "等待或無動作"。
+            """
+            if glossary:
+                prompt += f"\n【專業術語參考】：若畫面中有出現，請優先使用以下詞彙來稱呼物件：\n[{', '.join(glossary)}]\n(注意：這些術語僅供「名詞參考」，請依據圖片實際情況造句，絕對不要死板地複製貼上整個術語！)"
+                
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        ]
+                    }
+                ],
+                "stream": False
+            }
+            
+            auth = None
+            url = self.endpoint_url
+            
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=120)
+            response.raise_for_status()
+            
+            result_json = response.json()
+            if "choices" in result_json and len(result_json["choices"]) > 0:
+                result_text = result_json["choices"][0].get("message", {}).get("content", "{}")
+            else:
+                result_text = "{}"
+                
+            import re
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if match:
+                result_text = match.group(0)
+                
+            import json
+            result = json.loads(result_text)
+            return {
+                "part_name": result.get("part_name", "未知零件"),
+                "action_description": result.get("action_description", "未知動作")
+            }
+        except Exception as e:
+            print(f"[PartnerVisionModel] API 呼叫失敗: {str(e)}")
+            return {"part_name": "廠商 API 分析錯誤", "action_description": str(e)}
+
+    def analyze_single_frame_with_context(self, image_base64: str, step_name: str) -> dict:
+        try:
+            import requests
+            prompt = f"""
+            你是一個專業的工業工程師。
+            這張工廠作業畫面的任務對應工單上的步驟：「{step_name}」。
+            請觀察畫面，確認人員是否正在進行此動作，並詳細描述畫面中物件的狀態。
+            
+            請務必使用「繁體中文 (Traditional Chinese)」回答。
+            請回傳嚴格的 JSON 格式，包含兩個欄位：
+            - "part_name": "{step_name}" (請直接填入此名稱)
+            - "action_description": "發生的具體動作細節描述"
+            """
+            
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        ]
+                    }
+                ],
+                "stream": False
+            }
+            
+            auth = None
+            url = self.endpoint_url
+            
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=120)
+            response.raise_for_status()
+            
+            result_json = response.json()
+            if "choices" in result_json and len(result_json["choices"]) > 0:
+                result_text = result_json["choices"][0].get("message", {}).get("content", "{}")
+            else:
+                result_text = "{}"
+                
+            import json
+            import re
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if match:
+                result_text = match.group(0)
+            result_dict = json.loads(result_text)
+            
+            if "part_name" not in result_dict:
+                result_dict["part_name"] = step_name
+            if "action_description" not in result_dict:
+                result_dict["action_description"] = "無動作描述"
+                
+            return result_dict
+        except Exception as e:
+            print(f"[PartnerVisionModel] 驗證呼叫失敗: {str(e)}")
+            return {"part_name": step_name, "action_description": f"連線錯誤: {str(e)}"}
+
+    def analyze_multimodal_document(self, images_b64: list, prompt: str) -> str:
+        try:
+            import requests
+            import re
+            
+            content_list = [{"type": "text", "text": prompt + "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，嚴禁使用英文或簡體中文。"}]
+            for b64 in images_b64:
+                content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_list
+                    }
+                ],
+                "stream": False
+            }
+            
+            auth = None
+            url = self.endpoint_url
+            
+            print(f"[PartnerVisionModel] 發送多模態文件分析 ({len(images_b64)} 張圖片)...")
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=600)
+            response.raise_for_status()
+            
+            result_json = response.json()
+            if "choices" in result_json and len(result_json["choices"]) > 0:
+                result_text = result_json["choices"][0].get("message", {}).get("content", "{}").strip()
+            else:
+                result_text = "{}"
+                
+            match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
+            if match:
+                result_text = match.group(0)
+                
+            return result_text
+        except Exception as e:
+            print(f"[PartnerVisionModel] 多模態分析失敗: {str(e)}")
+            return '{"error": "廠商 API 分析錯誤"}'
+
+    def generate_text(self, prompt: str) -> str:
+        try:
+            import requests
+            import re
+            
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt + "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，包含 JSON 內的所有值，嚴禁使用英文或簡體中文。"
+                    }
+                ],
+                "stream": False
+            }
+            
+            auth = None
+            url = self.endpoint_url
+            
+            print(f"[PartnerVisionModel] 發送純文字推論...")
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=300)
+            response.raise_for_status()
+            
+            result_json = response.json()
+            if "choices" in result_json and len(result_json["choices"]) > 0:
+                result_text = result_json["choices"][0].get("message", {}).get("content", "{}").strip()
+            else:
+                result_text = "{}"
+                
+            match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
+            if match:
+                result_text = match.group(0)
+                
+            return result_text
+        except Exception as e:
+            print(f"[PartnerVisionModel] 文字推論失敗: {str(e)}")
+            return '{"error": "廠商 API 推論錯誤"}'
+
 # Factory pattern to get the desired model
 def get_vision_model(model_type: str = "mock", **kwargs) -> BaseVisionModel:
     if model_type.lower() == "gemini":
@@ -452,5 +660,10 @@ def get_vision_model(model_type: str = "mock", **kwargs) -> BaseVisionModel:
         return OllamaVisionModel(model_name=model_name)
     elif model_type.lower() == "mock":
         return MockVisionModel(api_key=kwargs.get("api_key"))
+    elif model_type.lower() == "partner":
+        return PartnerVisionModel(
+            endpoint_url=kwargs.get("endpoint_url"),
+            model_name=kwargs.get("model_name", "default")
+        )
     else:
         raise ValueError(f"不支援的模型類型: {model_type}")
