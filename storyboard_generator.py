@@ -32,6 +32,15 @@ class StoryboardGenerator:
             source_video = item.get('source_video', '')
             subtitle = item.get('subtitle', '')
             
+            sop_badge_html = ""
+            if item.get("sop_step"):
+                sop_file = item.get("sop_file", "未提供")
+                sop_page = item.get("sop_page", "")
+                sop_step = item.get("sop_step", "").replace('"', '&quot;').replace("'", "&#39;")
+                page_str = f"第 {sop_page} 頁" if sop_page else "未提供頁碼"
+                tooltip_text = f"SOP 檔案：{sop_file}&#10;頁碼：{page_str}&#10;步驟內容：{sop_step}"
+                sop_badge_html = f'<div style="display: inline-block; background: #eff6ff; color: #1d4ed8; padding: 4px 10px; border-radius: 6px; font-size: 0.85em; font-weight: bold; margin-bottom: 12px; margin-left: 8px; border: 1px solid #bfdbfe; box-shadow: 0 1px 2px rgba(0,0,0,0.05); cursor: help;" title="{tooltip_text}">📘 對照SOP</div>'
+            
             # 若有標準工時異常，顯示紅色 Badge
             abnormal_badge = ""
             if item.get("is_abnormal", False):
@@ -65,8 +74,16 @@ class StoryboardGenerator:
                     {source_html}
                 </td>
                 <td class="text-cell">
-                    <div style="font-weight: 600; color: var(--primary); margin-bottom: 8px;">{part_name}</div>
-                    <div>{action_desc} ({start_str}~{end_str}) {abnormal_badge}</div>
+                    <div onclick="navigator.clipboard.writeText(this.innerText.replace(' 📋已複製', '').trim()); let el=document.createElement('span'); el.innerText=' 📋已複製'; el.style.color='#10b981'; el.style.fontSize='0.8em'; el.style.marginLeft='8px'; this.appendChild(el); setTimeout(()=>el.remove(), 1500);" style="font-weight: 600; color: var(--primary); margin-bottom: 12px; cursor: pointer;" title="點擊複製步驟標題" onmouseover="this.style.opacity='0.7'" onmouseout="this.style.opacity='1'">
+                        {part_name}
+                    </div>
+                    <div style="display: inline-block; background: #f0fdf4; color: #166534; padding: 4px 10px; border-radius: 6px; font-size: 0.85em; font-weight: bold; margin-bottom: 12px; border: 1px solid #bbf7d0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                        ⏱️ {start_str} ~ {end_str} {abnormal_badge}
+                    </div>
+                    {sop_badge_html}
+                    <div style="color: var(--text-main); line-height: 1.6; margin-bottom: 8px; text-indent: 2em;">
+                        {action_desc}
+                    </div>
                     {f'<div style="margin-top: 15px; padding: 10px; background: #f1f5f9; border-left: 4px solid var(--primary); font-style: italic; color: var(--text-main);">💬 旁白/字幕：{subtitle}</div>' if subtitle else ''}
                 </td>
             </tr>
@@ -96,7 +113,15 @@ class StoryboardGenerator:
             '''
         
         # 替換模板變數
-        html_content = template.replace("__TABLE_ROWS_HTML__", table_rows_html)
+        report_title_name = os.path.splitext(os.path.basename(output_path))[0]
+        display_title = report_title_name
+        if display_title.endswith("分鏡稿"):
+            display_title = display_title[:-3]
+        elif display_title.endswith("_storyboard"):
+            display_title = display_title[:-11]
+            
+        html_content = template.replace("__REPORT_TITLE__", display_title)
+        html_content = html_content.replace("__TABLE_ROWS_HTML__", table_rows_html)
         html_content = html_content.replace("__AUDIT_PANEL_HTML__", audit_panel_html)
         
         # 處理影片名稱清單 (以 + 號分隔)

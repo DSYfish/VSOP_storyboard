@@ -49,7 +49,7 @@ class StoryboardAnalyzer:
             )
             
             storyboard.append({
-                "time_sec": frame["start_time"],
+                "time_sec": frame.get("time_sec", frame["start_time"]),
                 "start_time": frame["start_time"],
                 "end_time": frame["end_time"],
                 "duration": frame["std_duration"],
@@ -67,6 +67,30 @@ class StoryboardAnalyzer:
         if not raw_results:
             return []
 
+        # Temporal smoothing: 消除 AI 產生的 1 幀或 2 幀短暫震盪 (A-B-A 或 A-B-B-A)
+        # Pass 1: 消除 1 幀突波 (A-B-A -> A-A-A)
+        for i in range(1, len(raw_results) - 1):
+            p_f = raw_results[i-1]
+            n_f = raw_results[i+1]
+            c_f = raw_results[i]
+            if p_f.get("source_video") == n_f.get("source_video") == c_f.get("source_video"):
+                if p_f["action_description"] == n_f["action_description"]:
+                    c_f["action_description"] = p_f["action_description"]
+                    c_f["part_name"] = p_f["part_name"]
+
+        # Pass 2: 消除 2 幀突波 (A-B-B-A -> A-A-A-A)
+        for i in range(1, len(raw_results) - 2):
+            p_f = raw_results[i-1]
+            n_f = raw_results[i+2]
+            c_f1 = raw_results[i]
+            c_f2 = raw_results[i+1]
+            if p_f.get("source_video") == n_f.get("source_video") == c_f1.get("source_video") == c_f2.get("source_video"):
+                if p_f["action_description"] == n_f["action_description"]:
+                    c_f1["action_description"] = p_f["action_description"]
+                    c_f1["part_name"] = p_f["part_name"]
+                    c_f2["action_description"] = p_f["action_description"]
+                    c_f2["part_name"] = p_f["part_name"]
+
         merged = []
         current_action = raw_results[0].copy()
         current_action["start_time"] = current_action["time_sec"]
@@ -77,7 +101,6 @@ class StoryboardAnalyzer:
             
             # 若零件或動作描述與上一個影格相同，並且「來源影片也相同」，視為同一個動作持續進行
             if (frame.get("source_video") == current_action.get("source_video") and
-                frame["part_name"] == current_action["part_name"] and 
                 frame["action_description"] == current_action["action_description"]):
                 # 更新結束時間
                 current_action["end_time"] = frame["time_sec"]

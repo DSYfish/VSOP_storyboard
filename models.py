@@ -50,7 +50,7 @@ class BaseVisionModel(ABC):
         pass
 
     @abstractmethod
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, expect_json: bool = True) -> str:
         """
         純文字邏輯推論。
         """
@@ -66,11 +66,8 @@ class GeminiVisionModel(BaseVisionModel):
             raise ValueError("必須提供 Gemini API Key。")
         import google.generativeai as genai
         genai.configure(api_key=self.api_key)
-        # 使用支援視覺與結構化輸出的 flash 模型
-        self.model = genai.GenerativeModel(
-            model_name,
-            generation_config={"response_mime_type": "application/json"}
-        )
+        self.model = genai.GenerativeModel(model_name)
+        self.model_name = model_name
 
     def analyze_frame(self, image_base64: str, source_video: str = "", glossary: list = None) -> dict:
         print(f"[GeminiVisionModel] (單張模式) 正在發送圖片至 Gemini API 分析... (來源: {source_video})")
@@ -80,8 +77,13 @@ class GeminiVisionModel(BaseVisionModel):
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
             prompt = "你是一個專業的工業工程師。請回傳 JSON: {'part_name': '...', 'action_description': '...'}。請務必使用「繁體中文 (Traditional Chinese)」回答。"
             if glossary:
-                prompt += f" 若畫面中符合，請優先使用以下術語：{', '.join(glossary)}"
-            response = self.model.generate_content([prompt, image_blob])
+                steps_str = "\\n".join([f"- {g}" for g in glossary])
+                prompt += f" 若畫面中符合，請優先從以下清單選擇步驟並填入 action_description：\\n{steps_str}"
+            import google.generativeai as genai
+            response = self.model.generate_content(
+                [prompt, image_blob],
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+            )
             result = json.loads(response.text)
             return {"part_name": result.get("part_name", "未知"), "action_description": result.get("action_description", "未知")}
         except Exception as e:
@@ -97,7 +99,7 @@ class GeminiVisionModel(BaseVisionModel):
                 prompt = """
                 你是一個專業的工業工程師。我將提供一系列從工廠作業影片中依序擷取的關鍵影格（幾十張）。
                 請為「每一張」圖片進行動作分析。
-                請勿提及作業員（例如不要寫「人員正在...」），只專注於物件的狀態改變（例如「綠色端子被插入」）。
+                請勿提及作業員（例如不要寫「人員正在...」），只專注於物件的狀態改變（例如請寫：「螺絲被鎖緊」、「電線被插入」、「外殼被蓋上」等實際畫面上發生的事）。
                 
                 【重要：時間區段合併規則】
                 系統會根據你輸出的文字來計算動作時間。
@@ -113,7 +115,15 @@ class GeminiVisionModel(BaseVisionModel):
                 【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，嚴禁使用英文或簡體中文。
                 """
                 if glossary:
-                    prompt += f"\n【專業術語參考】：若畫面中有出現，請優先使用以下詞彙來稱呼物件：\n[{', '.join(glossary)}]\n(注意：這些術語僅供「名詞參考」，請依據每張圖片實際情況自己造句，絕對不要死板地複製貼上整個術語！)"
+                    steps_str = "\\n".join([f"- {g}" for g in glossary])
+                    prompt += f"""
+                    
+                    【任務對齊指令】：
+                    以下是標準作業程序(SOP)的步驟清單：
+                    {steps_str}
+                    
+                    請務必從上述清單中挑選出與圖片動作最吻合的步驟，並在你的動作描述最後面加上「(對應SOP: 該步驟文字)」。請務必保留你對畫面的「詳細動作描述」，不要只輸出 SOP 文字。若無相符步驟，請依據圖片實際情況造句。
+                    """
                 contents.append(prompt)
                 
                 for idx, frame in enumerate(keyframes):
@@ -124,7 +134,10 @@ class GeminiVisionModel(BaseVisionModel):
                     contents.append({"mime_type": "image/jpeg", "data": image_bytes})
                     
                 print(f"[GeminiVisionModel] 正在向 Google 雲端發送超大包裹...")
-                response = self.model.generate_content(contents)
+                response = self.model.generate_content(
+                    contents,
+                    generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+                )
                 
                 import re
                 json_str = response.text
@@ -172,6 +185,7 @@ class GeminiVisionModel(BaseVisionModel):
 
     def analyze_single_frame_with_context(self, image_base64: str, step_name: str) -> dict:
         try:
+            import google.generativeai as genai
             prompt = f"""
             你是一個專業的工業工程師。
             這張工廠作業畫面的任務對應工單上的步驟：「{step_name}」。
@@ -188,7 +202,10 @@ class GeminiVisionModel(BaseVisionModel):
                 prompt,
                 {"mime_type": "image/jpeg", "data": image_bytes}
             ]
-            response = self.model.generate_content(contents)
+            response = self.model.generate_content(
+                contents,
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+            )
             
             import re
             json_str = response.text
@@ -204,21 +221,27 @@ class GeminiVisionModel(BaseVisionModel):
 
     def analyze_multimodal_document(self, images_b64: list, prompt: str) -> str:
         try:
+            import google.generativeai as genai
             contents = [prompt]
             for img_b64 in images_b64:
                 image_bytes = base64.b64decode(img_b64)
                 contents.append({"mime_type": "image/jpeg", "data": image_bytes})
             print(f"[GeminiVisionModel] 發送多模態文件分析 ({len(images_b64)} 張圖片)...")
-            response = self.model.generate_content(contents)
+            response = self.model.generate_content(
+                contents,
+                generation_config=genai.types.GenerationConfig(response_mime_type="application/json")
+            )
             return response.text
         except Exception as e:
             print(f"[GeminiVisionModel] 多模態分析失敗: {str(e)}")
             return '{"error": "API 分析錯誤"}'
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, expect_json: bool = True) -> str:
         try:
             print("[GeminiVisionModel] 發送純文字推論...")
-            response = self.model.generate_content(prompt)
+            import google.generativeai as genai
+            config = genai.types.GenerationConfig(response_mime_type="application/json") if expect_json else None
+            response = self.model.generate_content(prompt, generation_config=config)
             return response.text
         except Exception as e:
             print(f"[GeminiVisionModel] 文字推論失敗: {str(e)}")
@@ -241,19 +264,40 @@ def get_available_ollama_models(host: str = "http://localhost:11434") -> list:
 class OllamaVisionModel(BaseVisionModel):
     """
     地端環境使用的 Ollama Vision Model 介面。
+    支援兩階段推論架構 (Dual-Model Pipeline)：先以 VLM 處理影像，再交由 LLM 處理邏輯。
     """
     def __init__(self, model_name: str = "llava-llama3", host: str = "http://localhost:11434"):
         self.model_name = model_name
         self.host = host.rstrip('/')
         self.api_url = f"{self.host}/api/generate"
+        self.current_video = None
+        self.last_action_memory = None
+        self.vlm_helper = self._find_vlm_helper()
+
+    def _find_vlm_helper(self):
+        try:
+            import requests
+            resp = requests.get(f"{self.host}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                models = [m["name"] for m in resp.json().get("models", [])]
+                for vlm in ["minicpm-v:latest", "llava-llama3:latest", "llava:34b", "llava:13b", "llava:latest"]:
+                    if vlm in models:
+                        return vlm
+        except Exception:
+            pass
+        return None # 未安裝輔助 VLM
 
     def analyze_frame(self, image_base64: str, source_video: str = "", glossary: list = None) -> dict:
+        if source_video and source_video != self.current_video:
+            self.current_video = source_video
+            self.last_action_memory = None
+            
         print(f"[OllamaVisionModel] 正在發送圖片至 Ollama ({self.model_name}) 分析... (來源: {source_video})")
         try:
             import requests
             prompt = """
             你是一個專業的工業工程師。請觀察這張工廠作業畫面，告訴我「什麼物件」正在被「做什麼動作」。
-            請不要提及作業員（例如：不要寫「作業員將...」或「人員正在...」），只專注於物件的狀態改變（例如：「綠色端子被插入設備」、「黑色設備被拿起」）。
+            請不要提及作業員（例如：不要寫「作業員將...」或「人員正在...」），只專注於物件的狀態改變（例如請寫：「螺絲被鎖緊」、「電線被插入設備」、「外殼被蓋上」等實際發生的動作）。
             
             【重要：動作歸類規則】
             請合理判斷當前的動作屬於哪一個「主要邏輯步驟」。
@@ -267,26 +311,86 @@ class OllamaVisionModel(BaseVisionModel):
             若畫面中沒有明顯動作，可以回傳 "等待或無動作"。
             """
             if glossary:
-                prompt += f"\n【專業術語參考】：若畫面中有出現，請優先使用以下詞彙來稱呼物件：\n[{', '.join(glossary)}]\n(注意：這些術語僅供「名詞參考」，請依據圖片實際情況造句，絕對不要死板地複製貼上整個術語！)"
+                steps_str = "\n".join([f"- {g}" for g in glossary])
+                prompt += f"""
                 
+                【任務對齊指令】：
+                以下是標準作業程序(SOP)的步驟清單：
+                {steps_str}
+                
+                請務必從上述清單中挑選出與圖片動作最吻合的步驟，並在你的動作描述最後面加上「(對應SOP: 該步驟文字)」。請務必保留你對畫面的「詳細動作描述」，不要只輸出 SOP 文字。若無相符步驟，請依據圖片實際情況造句。
+                """
+                
+            if self.last_action_memory:
+                prompt += f"\n\n💡【時間連續性提示】：前一秒（上一張影格）的動作為『{self.last_action_memory}』。如果當前畫面沒有明顯改變，請務必直接繼續回傳同樣的動作，避免動作過度破碎！"
+                
+            import json
+            import re
+
+            # --- 第一階段：視覺特徵萃取 (使用輕量級 VLM) ---
+            if self.vlm_helper:
+                print(f"[OllamaVisionModel] 第一階段：使用 {self.vlm_helper} 進行視覺特徵萃取...")
+                vlm_prompt = f"請詳細描述這張圖片中的人員動作、手部特寫以及主要物件狀態，越詳細越好。請用繁體中文回答。"
+                vlm_payload = {
+                    "model": self.vlm_helper,
+                    "prompt": vlm_prompt,
+                    "images": [image_base64],
+                    "stream": False,
+                    "options": {
+                        "num_predict": 1024,
+                        "temperature": 0.1
+                    }
+                }
+                try:
+                    vlm_resp = requests.post(self.api_url, json=vlm_payload, timeout=240)
+                    vlm_resp.raise_for_status()
+                    vision_context = vlm_resp.json().get("response", "無法獲取影像描述").strip()
+                except Exception as e:
+                    print(f"[OllamaVisionModel] 第一階段視覺萃取失敗: {str(e)}")
+                    vision_context = f"影像解析失敗: {str(e)}。請僅依據你的常識進行推論。"
+                
+                prompt += f"\n\n【前置視覺系統回報的畫面內容】：\n{vision_context}\n"
+                prompt += "請根據上述「前置視覺系統回報的畫面內容」，並結合你的專業判斷，輸出最終的 JSON 動作描述。"
+            else:
+                print(f"[OllamaVisionModel] 尚未安裝輔助視覺模型，自動降級。純影片模式下可能導致無效推論...")
+                prompt += "\n\n【注意】：系統環境未偵測到輔助視覺模型。請僅依據你的常識進行合理的情境擴寫推測。"
+
+            # --- 第二階段：核心邏輯判斷 ---
             payload = {
                 "model": self.model_name,
                 "prompt": prompt,
-                "images": [image_base64],
                 "stream": False,
-                "format": "json"
+                "format": "json",
+                "options": {
+                    "num_ctx": 4096,
+                    "num_predict": -1,
+                    "temperature": 0.1
+                }
             }
-            response = requests.post(self.api_url, json=payload, timeout=120)
+            response = requests.post(self.api_url, json=payload, timeout=240)
             response.raise_for_status()
-            import re
-            result_text = response.json().get("response", "{}")
+            
+            json_resp = response.json()
+            result_text = json_resp.get("response", "{}")
+            thinking_text = json_resp.get("thinking", "")
             match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            
             if match:
-                result_text = match.group(0)
-            result = json.loads(result_text)
+                try:
+                    result = json.loads(match.group(0))
+                except Exception:
+                    fallback_txt = result_text.strip() or thinking_text.strip() or "模型未回傳任何描述內容。"
+                    result = {"part_name": "未識別", "action_description": fallback_txt}
+            else:
+                fallback_txt = result_text.strip() or thinking_text.strip() or "模型未回傳任何描述內容。"
+                result = {"part_name": "未識別", "action_description": fallback_txt}
+                
+            action_desc = result.get("action_description", "未知動作")
+            self.last_action_memory = action_desc
+            
             return {
                 "part_name": result.get("part_name", "未知零件"),
-                "action_description": result.get("action_description", "未知動作")
+                "action_description": action_desc
             }
         except Exception as e:
             print(f"[OllamaVisionModel] API 呼叫失敗: {str(e)}")
@@ -295,10 +399,46 @@ class OllamaVisionModel(BaseVisionModel):
     def analyze_single_frame_with_context(self, image_base64: str, step_name: str) -> dict:
         try:
             import requests
-            prompt = f"""
+            import json
+            import re
+            
+            # --- 第一階段：視覺特徵萃取 (使用輕量級 VLM) ---
+            if self.vlm_helper:
+                print(f"[OllamaVisionModel] 第一階段：使用 {self.vlm_helper} 進行視覺特徵萃取...")
+                vlm_prompt = f"請詳細描述這張圖片中的人員動作、手部特寫以及主要物件狀態，越詳細越好。請用繁體中文回答。"
+                vlm_payload = {
+                    "model": self.vlm_helper,
+                    "prompt": vlm_prompt,
+                    "images": [image_base64],
+                    "stream": False,
+                    "options": {
+                        "num_predict": 1024,
+                        "temperature": 0.1
+                    }
+                }
+                
+                try:
+                    vlm_resp = requests.post(self.api_url, json=vlm_payload, timeout=240)
+                    vlm_resp.raise_for_status()
+                    vision_context = vlm_resp.json().get("response", "無法獲取影像描述").strip()
+                except Exception as e:
+                    print(f"[OllamaVisionModel] 第一階段視覺萃取失敗: {str(e)}")
+                    vision_context = f"影像解析失敗: {str(e)}。請僅依據標準步驟名稱進行推論。"
+            else:
+                print(f"[OllamaVisionModel] 未安裝輔助視覺模型，自動降級為「SOP 擴寫工具」模式...")
+                vision_context = "【注意】：系統環境未偵測到視覺神經網路，無法處理影像。請直接忽略視覺內容，並嚴格依據標準步驟名稱與您的專業知識，進行情境的合理擴寫與動作描述。"
+
+            # --- 第二階段：核心邏輯判斷 (使用公司指定 LLM，如 gemma4) ---
+            print(f"[OllamaVisionModel] 第二階段：交由 {self.model_name} 進行核心動作比對與生成...")
+            core_prompt = f"""
             你是一個專業的工業工程師。
             這張工廠作業畫面的任務對應工單上的步驟：「{step_name}」。
-            請觀察畫面，確認人員是否正在進行此動作，並詳細描述畫面中物件的狀態。
+            
+            【前置視覺系統回報的畫面內容】：
+            {vision_context}
+            
+            請根據上述「前置視覺系統回報的畫面內容」，判斷該畫面是否符合「{step_name}」的動作，並詳細描述畫面中物件的狀態與人員動作。
+            如果視覺系統回報的內容與步驟不符，請根據步驟名稱「{step_name}」進行合理的動作推論描述。
             
             請務必使用「繁體中文 (Traditional Chinese)」回答。
             請回傳嚴格的 JSON 格式，包含兩個欄位：
@@ -308,18 +448,33 @@ class OllamaVisionModel(BaseVisionModel):
             
             payload = {
                 "model": self.model_name,
-                "prompt": prompt,
-                "images": [image_base64],
+                "prompt": core_prompt,
                 "stream": False,
-                "format": "json"
+                "format": "json",
+                "options": {
+                    "num_ctx": 4096,
+                    "num_predict": -1,
+                    "temperature": 0.1
+                }
             }
             
-            response = requests.post(self.api_url, json=payload, timeout=120)
+            response = requests.post(self.api_url, json=payload, timeout=240)
             response.raise_for_status()
             
-            result_json = response.json().get("response", "{}")
-            import json
-            result_dict = json.loads(result_json)
+            json_resp = response.json()
+            result_text = json_resp.get("response", "{}")
+            thinking_text = json_resp.get("thinking", "")
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            
+            if match:
+                try:
+                    result_dict = json.loads(match.group(0))
+                except Exception:
+                    fallback_txt = result_text.strip() or thinking_text.strip() or "模型未回傳任何描述內容。"
+                    result_dict = {"part_name": step_name, "action_description": fallback_txt}
+            else:
+                fallback_txt = result_text.strip() or thinking_text.strip() or "模型未回傳任何描述內容。"
+                result_dict = {"part_name": step_name, "action_description": fallback_txt}
             
             # 確保欄位存在
             if "part_name" not in result_dict:
@@ -349,46 +504,13 @@ class OllamaVisionModel(BaseVisionModel):
                     }
                 ],
                 "options": {
-                    "num_ctx": 32768
+                    "num_ctx": 8192,
+                    "num_predict": 1024,
+                    "temperature": 0.1
                 },
-                "stream": False,
-                "format": "json"
+                "stream": False
             }
             print(f"[OllamaVisionModel] 發送多模態文件分析至 {self.model_name} (使用 Chat API, {len(images_b64)} 張圖片)...")
-            response = requests.post(chat_url, json=payload, timeout=600)
-            response.raise_for_status()
-            
-            result_text = response.json().get("message", {}).get("content", "{}").strip()
-            match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
-            if match:
-                result_text = match.group(0)
-                
-            return result_text
-        except Exception as e:
-            print(f"[OllamaVisionModel] 多模態分析失敗: {str(e)}")
-            return '{"error": "Ollama 分析錯誤"}'
-
-    def generate_text(self, prompt: str) -> str:
-        try:
-            import requests
-            import re
-            
-            chat_url = f"{self.host}/api/chat"
-            payload = {
-                "model": self.model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt + "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，包含 JSON 內的所有值，嚴禁使用英文或簡體中文。"
-                    }
-                ],
-                "options": {
-                    "num_ctx": 16384
-                },
-                "stream": False,
-                "format": "json"
-            }
-            print(f"[OllamaVisionModel] 發送純文字推論至 {self.model_name}...")
             response = requests.post(chat_url, json=payload, timeout=300)
             response.raise_for_status()
             
@@ -399,8 +521,55 @@ class OllamaVisionModel(BaseVisionModel):
                 
             return result_text
         except Exception as e:
+            print(f"[OllamaVisionModel] 多模態分析失敗: {str(e)}")
+            import json
+            return json.dumps({"error": f"Ollama 連線或推論失敗 ({str(e)})"})
+
+    def generate_text(self, prompt: str, expect_json: bool = True) -> str:
+        try:
+            import requests
+            import re
+            
+            chat_url = f"{self.host}/api/chat"
+            content_prompt = prompt
+            if expect_json:
+                content_prompt += "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，包含 JSON 內的所有值，嚴禁使用英文或簡體中文。"
+            else:
+                content_prompt += "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答。"
+            
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_prompt
+                    }
+                ],
+                "options": {
+                    "num_ctx": 8192,
+                    "num_predict": 2048,
+                    "temperature": 0.1
+                },
+                "stream": False
+            }
+            if expect_json:
+                payload["format"] = "json"
+                
+            print(f"[OllamaVisionModel] 發送純文字推論至 {self.model_name}...")
+            response = requests.post(chat_url, json=payload, timeout=300)
+            response.raise_for_status()
+            
+            result_text = response.json().get("message", {}).get("content", "{}").strip()
+            if expect_json:
+                match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
+                if match:
+                    result_text = match.group(0)
+            return result_text
+        except Exception as e:
             print(f"[OllamaVisionModel] 文字推論失敗: {str(e)}")
-            return '{"error": "Ollama 推論錯誤"}'
+            if expect_json:
+                return '{"error": "Ollama 推論錯誤"}'
+            return f"Ollama 推論錯誤: {str(e)}"
 
 class MockVisionModel(BaseVisionModel):
     """
@@ -436,25 +605,44 @@ class MockVisionModel(BaseVisionModel):
             elif cycle <= 27: return {"part_name": "條碼掃描", "action_description": "設備上的條碼被掃描紀錄。"}
             else: return {"part_name": "裝盒入庫", "action_description": "設備被放入專屬瓦楞紙盒（包裝盒）中。"}
 
+    def analyze_single_frame_with_context(self, image_base64: str, step_name: str) -> dict:
+        return {"part_name": step_name, "action_description": f"模擬畫面驗證: 確認正在執行 {step_name}"}
+
     def analyze_multimodal_document(self, images_b64: list, prompt: str) -> str:
+        if "候選步驟清單" in prompt or "分析與過濾任務" in prompt or "真正相關" in prompt:
+            return '[{"step_number": "1-1", "part_name": "Label 前", "action_description": "雙面膠撕剝除確認Label 前 (1)~(2)"}, {"step_number": "1-3", "part_name": "MES系統", "action_description": "MES: 開啟工序管理系統x1 PCS"}, {"step_number": "1-4", "part_name": "治具", "action_description": "MES刷入工序條碼"}, {"step_number": "1-5", "part_name": "BARCODE", "action_description": "BARCODE條碼讀取 標籤序號 & 貼標籤序號"}, {"step_number": "1-6", "part_name": "Thermal PAD", "action_description": "Thermal PAD 14x20x5mm 貼於U11 IC(背面)"}, {"step_number": "1-7", "part_name": "金屬外殼", "action_description": "上蓋外殼組裝與定位"}, {"step_number": "1-8", "part_name": "BO開關", "action_description": "BO位置放置上蓋, 鎖螺絲(E1->E2->E3->E4)*4"}, {"step_number": "1-9", "part_name": "LED導光柱", "action_description": "導光LED放置於面板孔位"}, {"step_number": "2", "part_name": "S/N序號", "action_description": "S/N流水編號檢查與確認"}]'
+        if "任務清單" in prompt or "標準化任務" in prompt or "步驟" in prompt:
+            return '[{"step_number": "1-1", "part_name": "TB 6PIN 端子", "action_description": "將綠色端子對準設備側邊插槽並安裝到位"}, {"step_number": "1-2", "part_name": "條碼標籤", "action_description": "手持條碼掃描器進行序號讀取與黏貼"}]'
         return '{"anchor_step": "模擬基準錨點 (P.17 2-6)", "audit_results": [], "missing_steps": [], "overall_conclusion": "這是測試環境的模擬多模態稽核結果。"}'
 
-    def generate_text(self, prompt: str) -> str:
-        return '{"extracted_glossary": ["TB 6PIN 端子", "網路交換器"], "refined_storyboard": []}'
+    def generate_text(self, prompt: str, expect_json: bool = True) -> str:
+        return '{"extracted_glossary": ["TB 6PIN 端子", "網路交換器"], "refined_storyboard": []}' if expect_json else "模擬純文字推論結果"
 
 class PartnerVisionModel(BaseVisionModel):
     """
     合作廠商地端 API (假設使用相容於 OpenAI /v1/chat/completions 的格式)
     """
     def __init__(self, endpoint_url: str, model_name: str = "default"):
-        self.endpoint_url = endpoint_url.rstrip('/')
+        url = endpoint_url.rstrip('/')
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1"):
+                url = f"{url}/chat/completions"
+            else:
+                url = f"{url}/v1/chat/completions"
+        self.endpoint_url = url
         self.model_name = model_name
+        self.current_video = None
+        self.last_action_memory = None
 
     def _get_headers(self):
         headers = {"Content-Type": "application/json"}
         return headers
 
     def analyze_frame(self, image_base64: str, source_video: str = "", glossary: list = None) -> dict:
+        if source_video and source_video != self.current_video:
+            self.current_video = source_video
+            self.last_action_memory = None
+            
         try:
             import requests
             prompt = f"""
@@ -470,7 +658,18 @@ class PartnerVisionModel(BaseVisionModel):
             若畫面中沒有明顯動作，可以回傳 "等待或無動作"。
             """
             if glossary:
-                prompt += f"\n【專業術語參考】：若畫面中有出現，請優先使用以下詞彙來稱呼物件：\n[{', '.join(glossary)}]\n(注意：這些術語僅供「名詞參考」，請依據圖片實際情況造句，絕對不要死板地複製貼上整個術語！)"
+                steps_str = "\\n".join([f"- {g}" for g in glossary])
+                prompt += f"""
+                
+                【任務對齊指令】：
+                以下是標準作業程序(SOP)的步驟清單：
+                {steps_str}
+                
+                請務必從上述清單中，挑選出與圖片動作最吻合的「一個步驟」，並將該步驟的完整文字直接填入 "action_description" 中。若無相符步驟，請依據圖片實際情況造句。
+                """
+                
+            if self.last_action_memory:
+                prompt += f"\\n\\n💡【時間連續性提示】：前一秒（上一張影格）的動作為『{self.last_action_memory}』。如果當前畫面沒有明顯改變，請務必直接繼續回傳同樣的動作，避免動作過度破碎！"
                 
             payload = {
                 "model": self.model_name,
@@ -489,7 +688,7 @@ class PartnerVisionModel(BaseVisionModel):
             auth = None
             url = self.endpoint_url
             
-            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=120)
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=240)
             response.raise_for_status()
             
             result_json = response.json()
@@ -499,15 +698,18 @@ class PartnerVisionModel(BaseVisionModel):
                 result_text = "{}"
                 
             import re
+            import json
             match = re.search(r'\{.*\}', result_text, re.DOTALL)
             if match:
                 result_text = match.group(0)
-                
-            import json
             result = json.loads(result_text)
+            
+            action_desc = result.get("action_description", "未知動作")
+            self.last_action_memory = action_desc
+            
             return {
                 "part_name": result.get("part_name", "未知零件"),
-                "action_description": result.get("action_description", "未知動作")
+                "action_description": action_desc
             }
         except Exception as e:
             print(f"[PartnerVisionModel] API 呼叫失敗: {str(e)}")
@@ -544,7 +746,7 @@ class PartnerVisionModel(BaseVisionModel):
             auth = None
             url = self.endpoint_url
             
-            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=120)
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=240)
             response.raise_for_status()
             
             result_json = response.json()
@@ -594,7 +796,7 @@ class PartnerVisionModel(BaseVisionModel):
             url = self.endpoint_url
             
             print(f"[PartnerVisionModel] 發送多模態文件分析 ({len(images_b64)} 張圖片)...")
-            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=600)
+            response = requests.post(url, json=payload, headers=self._get_headers(), auth=auth, timeout=300)
             response.raise_for_status()
             
             result_json = response.json()
@@ -610,19 +812,26 @@ class PartnerVisionModel(BaseVisionModel):
             return result_text
         except Exception as e:
             print(f"[PartnerVisionModel] 多模態分析失敗: {str(e)}")
-            return '{"error": "廠商 API 分析錯誤"}'
+            import json
+            return json.dumps({"error": f"廠商 API 連線或推論失敗 ({str(e)})"})
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, expect_json: bool = True) -> str:
         try:
             import requests
             import re
+            
+            content_prompt = prompt
+            if expect_json:
+                content_prompt += "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，包含 JSON 內的所有值，嚴禁使用英文或簡體中文。"
+            else:
+                content_prompt += "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答。"
             
             payload = {
                 "model": self.model_name,
                 "messages": [
                     {
                         "role": "user",
-                        "content": prompt + "\n【重要指令】：請務必且強制使用「繁體中文 (Traditional Chinese)」回答，包含 JSON 內的所有值，嚴禁使用英文或簡體中文。"
+                        "content": content_prompt
                     }
                 ],
                 "stream": False
@@ -639,16 +848,19 @@ class PartnerVisionModel(BaseVisionModel):
             if "choices" in result_json and len(result_json["choices"]) > 0:
                 result_text = result_json["choices"][0].get("message", {}).get("content", "{}").strip()
             else:
-                result_text = "{}"
+                result_text = "{}" if expect_json else ""
                 
-            match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
-            if match:
-                result_text = match.group(0)
+            if expect_json:
+                match = re.search(r'\[.*\]|\{.*\}', result_text, re.DOTALL)
+                if match:
+                    result_text = match.group(0)
                 
             return result_text
         except Exception as e:
             print(f"[PartnerVisionModel] 文字推論失敗: {str(e)}")
-            return '{"error": "廠商 API 推論錯誤"}'
+            if expect_json:
+                return '{"error": "廠商 API 推論錯誤"}'
+            return f"廠商 API 推論錯誤: {str(e)}"
 
 # Factory pattern to get the desired model
 def get_vision_model(model_type: str = "mock", **kwargs) -> BaseVisionModel:
